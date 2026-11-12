@@ -192,7 +192,7 @@ function makeCloudBackend(){
               .catch(e => { fatal = 'Tidak bisa membuat workspace pribadi (' + (e.code || e.message) + '). Pastikan aturan keamanan dari firestore.rules sudah dipasang.'; render(); });
             return;
           }
-          if (!B.workspaces.length) return;
+          if (!B.workspaces.length || snap.metadata.hasPendingWrites) return;
           const cur = B.activeWs && B.workspaces.find(w => w.id === B.activeWs.id);
           if (cur) { B.activeWs = cur; subscribeOut(); render(); return; }
           if (B.activeWs && !cur) toast('Anda tidak lagi menjadi anggota workspace itu.');
@@ -204,11 +204,12 @@ function makeCloudBackend(){
         }, () => {});
       });
     },
-    switchTo(id){
+    switchTo(id, attempt){
+      attempt = attempt || 0;
       const ws = B.workspaces.find(w => w.id === id); if (!ws) return;
       if (unsubItems) unsubItems(); unsubItems = null;
       B.activeWs = ws; lsSet('infina:activeWs:' + B.user.uid, id);
-      resetData(); wsReady = false; render();
+      resetData(); wsReady = false; if (!attempt) fatal = ''; render();
       let timer = setTimeout(() => { if (!wsReady) { bootNote = 'Data belum bisa dijangkau. Periksa koneksi internet; halaman memuat otomatis setelah tersambung.'; render(); } }, 10000);
       let definitive = false;
       const wsId = id;
@@ -219,7 +220,12 @@ function makeCloudBackend(){
         if (!definitive && !snap.metadata.fromCache) { definitive = true; clearTimeout(timer); bootNote = ''; wsReady = true; onWsReady(true); }
         else if (!wsReady && snap.size) { wsReady = true; onWsReady(false); }
         scheduleRender();
-      }, err => { clearTimeout(timer); fatal = 'Tidak bisa membaca data workspace (' + (err.code || err.message) + ').'; render(); });
+      }, err => {
+        clearTimeout(timer);
+        // A workspace that was just created or joined may not be visible to the security rules yet: retry a few times.
+        if (err && err.code === 'permission-denied' && attempt < 4 && B.activeWs && B.activeWs.id === wsId) { setTimeout(() => { if (B.activeWs && B.activeWs.id === wsId) B.switchTo(wsId, attempt + 1); }, 1200 * (attempt + 1)); return; }
+        fatal = 'Tidak bisa membaca data workspace (' + (err.code || err.message) + '). Pastikan aturan keamanan dari firestore.rules sudah dipasang, lalu muat ulang halaman.'; render();
+      });
       subscribeOut();
     },
     async createWorkspace(name){
@@ -2008,7 +2014,11 @@ function csvOf(list){
     t.paidBy ? memberFull(t.paidBy) : '', Math.round(t.amount), t.currency || 'IDR', t.status === 'void' ? 'Dibatalkan' : 'Tercatat', t.note]);
   return '﻿' + [head].concat(rows).map(r => r.map(q).join(';')).join('\r\n');
 }
-function offerFile(filename, text, type){
+async function offerFile(filename, text, type){
+  if (window.claude && typeof window.claude.use === 'function') {
+    try { const dl = await window.claude.use('downloads'); if (dl) { await dl.save({ filename, data: new Blob([text], { type }) }); return; } }
+    catch(e) { if (e && (e.code === 'declined' || e.code === 'rate_limited')) return; }
+  }
   try { const url = URL.createObjectURL(new Blob([text], { type })); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000); }
   catch(e) { toast('Unduhan gagal: ' + e.message, 'neg'); }
 }
@@ -2043,7 +2053,7 @@ function loadSample(){
   const prev = ymShift(curYM(), -1), cur = curYM(), day = n => { const d = `${cur}-${pad(n)}`; return d <= T ? d : null; };
   [[`${prev}-25`, 'income', 9500000, a.bca, null, 'Gaji', 'Gaji bulanan'], [`${prev}-26`, 'transfer', 1500000, a.bca, a.sav, null, 'Setor dana darurat'],
    [`${prev}-27`, 'expense', 650000, a.bca, null, 'Belanja', 'Belanja bulanan'], [`${prev}-28`, 'expense', 1200000, a.cc, null, 'Belanja', 'Sepatu kerja'],
-   [`${prev}-28`, 'expense', 85000, a.gopay, null, 'Transportasi', 'Ojek ke kantor'], [day(1), 'expense', 120000, a.cash, null, 'Makanan & Minuman', 'Makan siang tim'],
+   [`${prev}-28`, 'expense', 85000, a.gopay, null, 'Transportasi', 'Ojek ke kantor'], [day(1), 'expense', 120000, a.cash, null, 'Makanan & Minuman', 'Makan siang tim'], [day(5), 'income', 750000, a.bca, null, 'Usaha Sampingan', 'Honor freelance'],
    [day(2), 'transfer', 300000, a.bca, a.gopay, null, 'Isi saldo e-wallet'], [day(3), 'expense', 230000, a.gopay, null, 'Transportasi', 'Ojek dan KRL'],
    [day(4), 'expense', 540000, a.bca, null, 'Makanan & Minuman', 'Belanja dapur'], [day(6), 'expense', 175000, a.gopay, null, 'Hiburan', 'Nonton bioskop'],
    [day(8), 'expense', 410000, a.cc, null, 'Makanan & Minuman', 'Makan malam keluarga'], [day(9), 'transfer', 1200000, a.bca, a.cc, null, 'Bayar tagihan kartu kredit'],
@@ -2353,6 +2363,10 @@ window.addEventListener('offline', () => renderSide && shellMounted && renderSid
 
 let lastDay = todayISO();
 setInterval(() => { if (!wsReady) return; const t = todayISO(); if (t !== lastDay) { lastDay = t; runRecurring(); render(); } }, 60000);
+
+/* ---------- preview hook (only when a demo page sets INFINA_DEMO) ---------- */
+if (window.INFINA_DEMO) window.__infina = { S, persist, persistMany, mkTx, loadSample, render, uid, todayISO, addDays, catByName, toast,
+  get backend(){ return backend; }, get wsReady(){ return wsReady; } };
 
 /* ---------- boot ---------- */
 (function boot(){
